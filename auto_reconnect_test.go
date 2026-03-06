@@ -14,7 +14,7 @@ func TestCalculateAutoReconnectDelay(t *testing.T) {
 		{attempt: 1, expected: 5 * time.Second},
 		{attempt: 2, expected: 10 * time.Second},
 		{attempt: 3, expected: 20 * time.Second},
-		{attempt: 7, expected: 320 * time.Second},
+		{attempt: 7, expected: 5 * time.Minute},
 		{attempt: 8, expected: 5 * time.Minute},
 		{attempt: 20, expected: 5 * time.Minute},
 	}

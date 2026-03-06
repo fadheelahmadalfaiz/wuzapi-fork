@@ -456,6 +456,7 @@ func (s *server) refreshUserWebhookCacheAndSubscriptions(userID, token string) {
 		log.Warn().Err(err).Str("userID", userID).Msg("Failed to refresh webhooks from DB")
 		return
 	}
+	webhookcfgcache.Set(userID, buildDispatchConfigsFromWebhooks(webhooks, token), cache.NoExpiration)
 
 	legacyURL := ""
 	for _, hook := range webhooks {
@@ -488,12 +489,7 @@ func (s *server) refreshUserWebhookCacheAndSubscriptions(userID, token string) {
 	log.Info().Str("user", userID).Strs("events", unionEvents).Msg("Refreshed union webhook subscriptions")
 }
 
-func (s *server) listDispatchWebhooks(userID, token string) ([]WebhookDispatchConfig, error) {
-	webhooks, err := s.getUserWebhooks(userID)
-	if err != nil {
-		return nil, err
-	}
-
+func buildDispatchConfigsFromWebhooks(webhooks []UserWebhook, token string) []WebhookDispatchConfig {
 	var defaultEncryptedHmacKey []byte
 	if userinfo, found := userinfocache.Get(token); found {
 		encryptedB64 := userinfo.(Values).Get("HmacKeyEncrypted")
@@ -533,6 +529,24 @@ func (s *server) listDispatchWebhooks(userID, token string) ([]WebhookDispatchCo
 
 		configs = append(configs, cfg)
 	}
+
+	return configs
+}
+
+func (s *server) listDispatchWebhooks(userID, token string) ([]WebhookDispatchConfig, error) {
+	if cached, found := webhookcfgcache.Get(userID); found {
+		if configs, ok := cached.([]WebhookDispatchConfig); ok {
+			return configs, nil
+		}
+	}
+
+	webhooks, err := s.getUserWebhooks(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	configs := buildDispatchConfigsFromWebhooks(webhooks, token)
+	webhookcfgcache.Set(userID, configs, cache.NoExpiration)
 
 	return configs, nil
 }

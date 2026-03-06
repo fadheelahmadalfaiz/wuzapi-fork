@@ -314,6 +314,9 @@ func (s *server) Disconnect() http.HandlerFunc {
 		if clientManager.GetWhatsmeowClient(txtid).IsConnected() == true {
 			//if clientManager.GetWhatsmeowClient(txtid).IsLoggedIn() == true {
 			log.Info().Str("jid", jid).Msg("Disconnection successfull")
+			if mycli := clientManager.GetMyClient(txtid); mycli != nil {
+				mycli.disableAutoReconnect()
+			}
 			_, err := s.db.Exec("UPDATE users SET connected=0,events=$1 WHERE id=$2", "", txtid)
 			if err != nil {
 				log.Warn().Str("txtid", txtid).Msg("Could not set events in users table")
@@ -719,6 +722,9 @@ func (s *server) Logout() http.HandlerFunc {
 		} else {
 			if clientManager.GetWhatsmeowClient(txtid).IsLoggedIn() == true &&
 				clientManager.GetWhatsmeowClient(txtid).IsConnected() == true {
+				if mycli := clientManager.GetMyClient(txtid); mycli != nil {
+					mycli.disableAutoReconnect()
+				}
 				err := clientManager.GetWhatsmeowClient(txtid).Logout(context.Background())
 				if err != nil {
 					log.Error().Str("jid", jid).Msg("Could not perform logout")

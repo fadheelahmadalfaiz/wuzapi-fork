@@ -407,6 +407,7 @@ func (s *server) connectOnStartup() {
 				"HmacKeyEncrypted": hmacKeyEncrypted,
 			}}
 			userinfocache.Set(token, v, cache.NoExpiration)
+			s.refreshUserWebhookCacheAndSubscriptions(txtid, token)
 			// Gets and set subscription to webhook events
 			eventarray := strings.Split(events, ",")
 
@@ -779,16 +780,6 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 				Int("attempts", maxConnectionRetries).
 				Msg("Failed to connect to WhatsApp after all retry attempts")
 
-			clientManager.DeleteWhatsmeowClient(userID)
-			clientManager.DeleteMyClient(userID)
-			clientManager.DeleteHTTPClient(userID)
-
-			sqlStmt := `UPDATE users SET qrcode='', connected=0 WHERE id=$1`
-			_, dbErr := s.db.Exec(sqlStmt, userID)
-			if dbErr != nil {
-				log.Error().Err(dbErr).Msg("Failed to update user status after connection error")
-			}
-
 			// Use the existing mycli instance from outer scope
 			postmap := make(map[string]interface{})
 			postmap["event"] = "ConnectFailure"
@@ -797,8 +788,7 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 			postmap["attempts"] = maxConnectionRetries
 			postmap["reason"] = "Failed to connect after retry attempts"
 			sendEventWithWebHook(&mycli, postmap, "")
-
-			return
+			mycli.scheduleAutoReconnect("initial_connect_failed")
 		}
 	}
 
@@ -807,6 +797,7 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 		select {
 		case <-killchannel[userID]:
 			log.Info().Str("userid", userID).Msg("Received kill signal")
+			mycli.disableAutoReconnect()
 			client.Disconnect()
 			clientManager.DeleteWhatsmeowClient(userID)
 			clientManager.DeleteMyClient(userID)
@@ -854,6 +845,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	case *events.Connected, *events.PushNameSetting:
 		postmap["type"] = "Connected"
 		dowebhook = 1
+		mycli.resetAutoReconnect()
 		if len(mycli.WAClient.Store.PushName) == 0 {
 			break
 		}
@@ -977,6 +969,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			}()
 		}
 	case *events.StreamReplaced:
+		mycli.disableAutoReconnect()
 		log.Info().Msg("Received StreamReplaced event")
 		return
 	case *events.Message:
@@ -1999,6 +1992,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	case *events.LoggedOut:
 		postmap["type"] = "LoggedOut"
 		dowebhook = 1
+		mycli.disableAutoReconnect()
 		log.Info().Str("reason", evt.Reason.String()).Msg("Logged out")
 		defer func() {
 			// Use a non-blocking send to prevent a deadlock if the receiver has already terminated.
@@ -2041,10 +2035,12 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		postmap["type"] = "Disconnected"
 		dowebhook = 1
 		log.Info().Str("reason", fmt.Sprintf("%+v", evt)).Msg("Disconnected from Whatsapp")
+		mycli.scheduleAutoReconnect("disconnected_event")
 	case *events.ConnectFailure:
 		postmap["type"] = "ConnectFailure"
 		dowebhook = 1
 		log.Error().Str("reason", fmt.Sprintf("%+v", evt)).Msg("Failed to connect to Whatsapp")
+		mycli.scheduleAutoReconnect("connect_failure_event")
 	case *events.UndecryptableMessage:
 		postmap["type"] = "UndecryptableMessage"
 		dowebhook = 1
@@ -2081,6 +2077,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		postmap["type"] = "KeepAliveTimeout"
 		dowebhook = 1
 		log.Warn().Msg("Keep alive timeout")
+		mycli.scheduleAutoReconnect("keepalive_timeout")
 	case *events.ClientOutdated:
 		postmap["type"] = "ClientOutdated"
 		dowebhook = 1
