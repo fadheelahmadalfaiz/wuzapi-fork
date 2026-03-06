@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -42,6 +43,129 @@ type MyClient struct {
 	subscriptions  []string
 	db             *sqlx.DB
 	s              *server
+	reconnectMu    sync.Mutex
+	reconnecting   bool
+	reconnectStop  bool
+}
+
+const (
+	autoReconnectBaseDelay = 5 * time.Second
+	autoReconnectMaxDelay  = 5 * time.Minute
+)
+
+func calculateAutoReconnectDelay(attempt int) time.Duration {
+	if attempt <= 1 {
+		return autoReconnectBaseDelay
+	}
+
+	delay := autoReconnectBaseDelay
+	for i := 1; i < attempt; i++ {
+		delay *= 2
+		if delay >= autoReconnectMaxDelay {
+			return autoReconnectMaxDelay
+		}
+	}
+
+	if delay > autoReconnectMaxDelay {
+		return autoReconnectMaxDelay
+	}
+
+	return delay
+}
+
+func (mycli *MyClient) beginAutoReconnect() bool {
+	mycli.reconnectMu.Lock()
+	defer mycli.reconnectMu.Unlock()
+
+	if mycli.reconnectStop || mycli.reconnecting {
+		return false
+	}
+
+	mycli.reconnecting = true
+	return true
+}
+
+func (mycli *MyClient) resetAutoReconnect() {
+	mycli.reconnectMu.Lock()
+	defer mycli.reconnectMu.Unlock()
+
+	mycli.reconnectStop = false
+	mycli.reconnecting = false
+}
+
+func (mycli *MyClient) disableAutoReconnect() {
+	mycli.reconnectMu.Lock()
+	defer mycli.reconnectMu.Unlock()
+
+	mycli.reconnectStop = true
+	mycli.reconnecting = false
+}
+
+func (mycli *MyClient) shouldContinueAutoReconnect() bool {
+	mycli.reconnectMu.Lock()
+	defer mycli.reconnectMu.Unlock()
+
+	return !mycli.reconnectStop
+}
+
+func (mycli *MyClient) scheduleAutoReconnect(reason string) {
+	if !mycli.beginAutoReconnect() {
+		log.Debug().Str("userID", mycli.userID).Str("reason", reason).Msg("Auto-reconnect skipped")
+		return
+	}
+
+	go func() {
+		attempt := 1
+		for {
+			if !mycli.shouldContinueAutoReconnect() {
+				return
+			}
+
+			if currentClient := clientManager.GetMyClient(mycli.userID); currentClient != mycli {
+				mycli.disableAutoReconnect()
+				return
+			}
+
+			if mycli.WAClient == nil || mycli.WAClient.Store.ID == nil {
+				mycli.disableAutoReconnect()
+				return
+			}
+
+			if mycli.WAClient.IsConnected() {
+				mycli.resetAutoReconnect()
+				return
+			}
+
+			delay := calculateAutoReconnectDelay(attempt)
+			log.Warn().
+				Str("userID", mycli.userID).
+				Str("reason", reason).
+				Int("attempt", attempt).
+				Dur("delay", delay).
+				Msg("Scheduling WhatsApp auto-reconnect")
+
+			time.Sleep(delay)
+
+			if !mycli.shouldContinueAutoReconnect() {
+				return
+			}
+
+			if currentClient := clientManager.GetMyClient(mycli.userID); currentClient != mycli {
+				mycli.disableAutoReconnect()
+				return
+			}
+
+			err := mycli.WAClient.Connect()
+			if err == nil {
+				log.Info().Str("userID", mycli.userID).Int("attempt", attempt).Msg("WhatsApp auto-reconnect succeeded")
+				mycli.resetAutoReconnect()
+				return
+			}
+
+			log.Warn().Err(err).Str("userID", mycli.userID).Int("attempt", attempt).Msg("WhatsApp auto-reconnect attempt failed")
+			attempt++
+		}
+	}()
 }
 
 func sendToGlobalWebHook(jsonData []byte, token string, userID string) {
@@ -460,7 +584,16 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 	store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_DESKTOP.Enum()
 	store.DeviceProps.Os = osName
 
-	mycli := MyClient{client, 1, userID, token, token, subscriptions, s.db, s}
+	mycli := MyClient{
+		WAClient:       client,
+		eventHandlerID: 1,
+		userID:         userID,
+		token:          token,
+		sessionToken:   token,
+		subscriptions:  subscriptions,
+		db:             s.db,
+		s:              s,
+	}
 	mycli.eventHandlerID = mycli.WAClient.AddEventHandler(mycli.myEventHandler)
 
 	// Store the MyClient in clientManager
