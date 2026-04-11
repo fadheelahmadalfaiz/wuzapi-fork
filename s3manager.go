@@ -325,9 +325,9 @@ func (m *S3Manager) GetPublicURL(userID, key string) string {
 		return ""
 	}
 
-	// Use custom public URL if configured
+	// Use custom public URL if configured (CDN/custom domain already points to bucket, skip bucket in path)
 	if config.PublicURL != "" {
-		return fmt.Sprintf("%s/%s/%s", strings.TrimRight(config.PublicURL, "/"), config.Bucket, key)
+		return fmt.Sprintf("%s/%s", strings.TrimRight(config.PublicURL, "/"), key)
 	}
 
 	// Generate standard S3 URL
@@ -538,8 +538,9 @@ func (m *S3Manager) ProcessMediaForS3WithFailover(ctx context.Context, userID, c
 }
 
 func (m *S3Manager) getPublicURLFromConfig(config *S3Config, key string) string {
+	// Use custom public URL if configured (CDN/custom domain already points to bucket, skip bucket in path)
 	if config.PublicURL != "" {
-		return fmt.Sprintf("%s/%s/%s", strings.TrimRight(config.PublicURL, "/"), config.Bucket, key)
+		return fmt.Sprintf("%s/%s", strings.TrimRight(config.PublicURL, "/"), key)
 	}
 
 	if config.PathStyle {
