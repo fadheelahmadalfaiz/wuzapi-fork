@@ -428,6 +428,10 @@ func (s *server) connectOnStartup() {
 			}
 			eventstring := strings.Join(subscribedEvents, ",")
 			log.Info().Str("events", eventstring).Str("jid", jid).Msg("Attempt to connect")
+			if !clientManager.BeginSessionStart(txtid) {
+				log.Warn().Str("userid", txtid).Msg("Skipping startup connect because session is already starting or active")
+				continue
+			}
 			killchannel[txtid] = make(chan bool, 1)
 			go s.startClient(txtid, jid, token, subscribedEvents)
 
@@ -543,6 +547,7 @@ func parseJID(arg string) (types.JID, bool) {
 
 func (s *server) startClient(userID string, textjid string, token string, subscriptions []string) {
 	log.Info().Str("userid", userID).Str("jid", textjid).Msg("Starting websocket connection to Whatsapp")
+	defer clientManager.FinishSessionStart(userID)
 
 	// Connection retry constants
 	const maxConnectionRetries = 3
@@ -969,9 +974,10 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			}()
 		}
 	case *events.StreamReplaced:
-		mycli.disableAutoReconnect()
+		postmap["type"] = "StreamReplaced"
+		dowebhook = 1
 		log.Info().Msg("Received StreamReplaced event")
-		return
+		mycli.scheduleAutoReconnect("stream_replaced")
 	case *events.Message:
 
 		var s3Config struct {

@@ -12,6 +12,7 @@ type ClientManager struct {
 	whatsmeowClients map[string]*whatsmeow.Client
 	httpClients      map[string]*resty.Client
 	myClients        map[string]*MyClient
+	startingSessions map[string]bool
 }
 
 func NewClientManager() *ClientManager {
@@ -19,7 +20,30 @@ func NewClientManager() *ClientManager {
 		whatsmeowClients: make(map[string]*whatsmeow.Client),
 		httpClients:      make(map[string]*resty.Client),
 		myClients:        make(map[string]*MyClient),
+		startingSessions: make(map[string]bool),
 	}
+}
+
+func (cm *ClientManager) BeginSessionStart(userID string) bool {
+	cm.Lock()
+	defer cm.Unlock()
+	if cm.startingSessions[userID] || cm.whatsmeowClients[userID] != nil || cm.myClients[userID] != nil {
+		return false
+	}
+	cm.startingSessions[userID] = true
+	return true
+}
+
+func (cm *ClientManager) FinishSessionStart(userID string) {
+	cm.Lock()
+	defer cm.Unlock()
+	delete(cm.startingSessions, userID)
+}
+
+func (cm *ClientManager) HasSession(userID string) bool {
+	cm.RLock()
+	defer cm.RUnlock()
+	return cm.startingSessions[userID] || cm.whatsmeowClients[userID] != nil || cm.myClients[userID] != nil
 }
 
 func (cm *ClientManager) SetWhatsmeowClient(userID string, client *whatsmeow.Client) {

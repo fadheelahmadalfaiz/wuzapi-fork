@@ -235,12 +235,14 @@ func (s *server) Connect() http.HandlerFunc {
 			return
 		}
 
-		if clientManager.GetWhatsmeowClient(txtid) != nil {
-			isConnected := clientManager.GetWhatsmeowClient(txtid).IsConnected()
-			if isConnected == true {
-				s.Respond(w, r, http.StatusInternalServerError, errors.New("already connected"))
-				return
-			}
+		if existingClient := clientManager.GetWhatsmeowClient(txtid); existingClient != nil && existingClient.IsConnected() {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("already connected"))
+			return
+		}
+
+		if !clientManager.BeginSessionStart(txtid) {
+			s.Respond(w, r, http.StatusConflict, errors.New("session is already starting or active"))
+			return
 		}
 
 		var subscribedEvents []string
@@ -835,8 +837,13 @@ func (s *server) GetStatus() http.HandlerFunc {
 
 		txtid := userInfo.Get("Id")
 
-		isConnected := clientManager.GetWhatsmeowClient(txtid).IsConnected()
-		isLoggedIn := clientManager.GetWhatsmeowClient(txtid).IsLoggedIn()
+		client := clientManager.GetWhatsmeowClient(txtid)
+		isConnected := false
+		isLoggedIn := false
+		if client != nil {
+			isConnected = client.IsConnected()
+			isLoggedIn = client.IsLoggedIn()
+		}
 
 		var proxyURL string
 		s.db.QueryRow("SELECT proxy_url FROM users WHERE id = $1", txtid).Scan(&proxyURL)
