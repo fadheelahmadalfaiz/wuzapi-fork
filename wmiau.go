@@ -362,105 +362,123 @@ func checkIfSubscribedToEvent(subscribedEvents []string, eventType string, userI
 	return true
 }
 
-// Connects to Whatsapp Websocket on server startup if last state was connected
+type startupUser struct {
+	ID            string `db:"id"`
+	Name          string `db:"name"`
+	Token         string `db:"token"`
+	JID           string `db:"jid"`
+	Webhook       string `db:"webhook"`
+	Events        string `db:"events"`
+	ProxyURL      string `db:"proxy_url"`
+	S3Enabled     string `db:"s3_enabled"`
+	MediaDelivery string `db:"media_delivery"`
+	History       int    `db:"history"`
+	HMACKey       []byte `db:"hmac_key"`
+}
+
+func loadStartupUsers(db *sqlx.DB) ([]startupUser, error) {
+	users := []startupUser{}
+	err := db.Select(&users, "SELECT id,name,token,jid,webhook,events,proxy_url,CASE WHEN s3_enabled THEN 'true' ELSE 'false' END AS s3_enabled,COALESCE(media_delivery, 'base64') as media_delivery,COALESCE(history, 0) as history,hmac_key FROM users WHERE COALESCE(autostart, 0)=1 AND COALESCE(jid, '') <> ''")
+	if err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
+// Connects to Whatsapp Websocket on server startup if autostart is enabled for a paired session
 func (s *server) connectOnStartup() {
-	rows, err := s.db.Queryx("SELECT id,name,token,jid,webhook,events,proxy_url,CASE WHEN s3_enabled THEN 'true' ELSE 'false' END AS s3_enabled,COALESCE(media_delivery, 'base64') as media_delivery,COALESCE(history, 0) as history,hmac_key FROM users WHERE connected=1")
+	startupUsers, err := loadStartupUsers(s.db)
 	if err != nil {
 		log.Error().Err(err).Msg("DB Problem")
 		return
 	}
-	defer rows.Close()
-	for rows.Next() {
-		txtid := ""
-		token := ""
-		jid := ""
-		name := ""
-		webhook := ""
-		events := ""
-		proxy_url := ""
-		s3_enabled := ""
-		media_delivery := ""
-		var history int
-		var hmac_key []byte
-		err = rows.Scan(&txtid, &name, &token, &jid, &webhook, &events, &proxy_url, &s3_enabled, &media_delivery, &history, &hmac_key)
-		if err != nil {
-			log.Error().Err(err).Msg("DB Problem")
-			return
+	for _, startupUser := range startupUsers {
+		txtid := startupUser.ID
+		token := startupUser.Token
+		jid := startupUser.JID
+		name := startupUser.Name
+		webhook := startupUser.Webhook
+		events := startupUser.Events
+		proxy_url := startupUser.ProxyURL
+		s3_enabled := startupUser.S3Enabled
+		media_delivery := startupUser.MediaDelivery
+		history := startupUser.History
+		hmac_key := startupUser.HMACKey
+
+		hmacKeyEncrypted := ""
+		if len(hmac_key) > 0 {
+			hmacKeyEncrypted = base64.StdEncoding.EncodeToString(hmac_key)
+		}
+
+		log.Info().Str("token", token).Msg("Connect to Whatsapp on startup")
+		v := Values{map[string]string{
+			"Id":               txtid,
+			"Name":             name,
+			"Jid":              jid,
+			"Webhook":          webhook,
+			"Token":            token,
+			"Proxy":            proxy_url,
+			"Events":           events,
+			"S3Enabled":        s3_enabled,
+			"MediaDelivery":    media_delivery,
+			"History":          fmt.Sprintf("%d", history),
+			"HmacKeyEncrypted": hmacKeyEncrypted,
+		}}
+		userinfocache.Set(token, v, cache.NoExpiration)
+		s.refreshUserWebhookCacheAndSubscriptions(txtid, token)
+		// Gets and set subscription to webhook events
+		eventarray := strings.Split(events, ",")
+
+		var subscribedEvents []string
+		if len(eventarray) == 1 && eventarray[0] == "" {
+			subscribedEvents = []string{}
 		} else {
-			hmacKeyEncrypted := ""
-			if len(hmac_key) > 0 {
-				hmacKeyEncrypted = base64.StdEncoding.EncodeToString(hmac_key)
-			}
-
-			log.Info().Str("token", token).Msg("Connect to Whatsapp on startup")
-			v := Values{map[string]string{
-				"Id":               txtid,
-				"Name":             name,
-				"Jid":              jid,
-				"Webhook":          webhook,
-				"Token":            token,
-				"Proxy":            proxy_url,
-				"Events":           events,
-				"S3Enabled":        s3_enabled,
-				"MediaDelivery":    media_delivery,
-				"History":          fmt.Sprintf("%d", history),
-				"HmacKeyEncrypted": hmacKeyEncrypted,
-			}}
-			userinfocache.Set(token, v, cache.NoExpiration)
-			s.refreshUserWebhookCacheAndSubscriptions(txtid, token)
-			// Gets and set subscription to webhook events
-			eventarray := strings.Split(events, ",")
-
-			var subscribedEvents []string
-			if len(eventarray) == 1 && eventarray[0] == "" {
-				subscribedEvents = []string{}
-			} else {
-				for _, arg := range eventarray {
-					if !Find(supportedEventTypes, arg) {
-						log.Warn().Str("Type", arg).Msg("Event type discarded")
-						continue
-					}
-					if !Find(subscribedEvents, arg) {
-						subscribedEvents = append(subscribedEvents, arg)
-					}
+			for _, arg := range eventarray {
+				if !Find(supportedEventTypes, arg) {
+					log.Warn().Str("Type", arg).Msg("Event type discarded")
+					continue
 				}
-
-			}
-			eventstring := strings.Join(subscribedEvents, ",")
-			log.Info().Str("events", eventstring).Str("jid", jid).Msg("Attempt to connect")
-			if !clientManager.BeginSessionStart(txtid) {
-				log.Warn().Str("userid", txtid).Msg("Skipping startup connect because session is already starting or active")
-				continue
-			}
-			killchannel[txtid] = make(chan bool, 1)
-			go s.startClient(txtid, jid, token, subscribedEvents)
-
-			// Initialize S3 client if configured
-			go func(userID string) {
-				var s3Config struct {
-					Enabled                 bool   `db:"s3_enabled"`
-					Endpoint                string `db:"s3_endpoint"`
-					Region                  string `db:"s3_region"`
-					Bucket                  string `db:"s3_bucket"`
-					AccessKey               string `db:"s3_access_key"`
-					SecretKey               string `db:"s3_secret_key"`
-					PathStyle               bool   `db:"s3_path_style"`
-					PublicURL               string `db:"s3_public_url"`
-					RetentionDays           int    `db:"s3_retention_days"`
-					SecondaryEnabled        bool   `db:"s3_secondary_enabled"`
-					SecondaryEndpoint       string `db:"s3_secondary_endpoint"`
-					SecondaryRegion         string `db:"s3_secondary_region"`
-					SecondaryBucket         string `db:"s3_secondary_bucket"`
-					SecondaryAccessKey      string `db:"s3_secondary_access_key"`
-					SecondarySecretKey      string `db:"s3_secondary_secret_key"`
-					SecondaryPathStyle      bool   `db:"s3_secondary_path_style"`
-					SecondaryPublicURL      string `db:"s3_secondary_public_url"`
-					SecondaryRetentionDays  int    `db:"s3_secondary_retention_days"`
-					FailoverThreshold       int    `db:"s3_failover_threshold"`
-					FailoverCooldownMinutes int    `db:"s3_failover_cooldown_minutes"`
+				if !Find(subscribedEvents, arg) {
+					subscribedEvents = append(subscribedEvents, arg)
 				}
+			}
 
-				err := s.db.Get(&s3Config, `
+		}
+		eventstring := strings.Join(subscribedEvents, ",")
+		log.Info().Str("events", eventstring).Str("jid", jid).Msg("Attempt to connect")
+		if !clientManager.BeginSessionStart(txtid) {
+			log.Warn().Str("userid", txtid).Msg("Skipping startup connect because session is already starting or active")
+			continue
+		}
+		killchannel[txtid] = make(chan bool, 1)
+		go s.startClient(txtid, jid, token, subscribedEvents)
+
+		// Initialize S3 client if configured
+		go func(userID string) {
+			var s3Config struct {
+				Enabled                 bool   `db:"s3_enabled"`
+				Endpoint                string `db:"s3_endpoint"`
+				Region                  string `db:"s3_region"`
+				Bucket                  string `db:"s3_bucket"`
+				AccessKey               string `db:"s3_access_key"`
+				SecretKey               string `db:"s3_secret_key"`
+				PathStyle               bool   `db:"s3_path_style"`
+				PublicURL               string `db:"s3_public_url"`
+				RetentionDays           int    `db:"s3_retention_days"`
+				SecondaryEnabled        bool   `db:"s3_secondary_enabled"`
+				SecondaryEndpoint       string `db:"s3_secondary_endpoint"`
+				SecondaryRegion         string `db:"s3_secondary_region"`
+				SecondaryBucket         string `db:"s3_secondary_bucket"`
+				SecondaryAccessKey      string `db:"s3_secondary_access_key"`
+				SecondarySecretKey      string `db:"s3_secondary_secret_key"`
+				SecondaryPathStyle      bool   `db:"s3_secondary_path_style"`
+				SecondaryPublicURL      string `db:"s3_secondary_public_url"`
+				SecondaryRetentionDays  int    `db:"s3_secondary_retention_days"`
+				FailoverThreshold       int    `db:"s3_failover_threshold"`
+				FailoverCooldownMinutes int    `db:"s3_failover_cooldown_minutes"`
+			}
+
+			err := s.db.Get(&s3Config, `
 					SELECT s3_enabled, s3_endpoint, s3_region, s3_bucket, 
 						   s3_access_key, s3_secret_key, s3_path_style, 
 						   s3_public_url, s3_retention_days,
@@ -477,52 +495,47 @@ func (s *server) connectOnStartup() {
 						   COALESCE(s3_failover_cooldown_minutes, 10) as s3_failover_cooldown_minutes
 					FROM users WHERE id = $1`, userID)
 
+			if err != nil {
+				log.Error().Err(err).Str("userID", userID).Msg("Failed to get S3 config")
+				return
+			}
+
+			if s3Config.Enabled {
+				config := &S3Config{
+					Enabled:       s3Config.Enabled,
+					Endpoint:      s3Config.Endpoint,
+					Region:        s3Config.Region,
+					Bucket:        s3Config.Bucket,
+					AccessKey:     s3Config.AccessKey,
+					SecretKey:     s3Config.SecretKey,
+					PathStyle:     s3Config.PathStyle,
+					PublicURL:     s3Config.PublicURL,
+					RetentionDays: s3Config.RetentionDays,
+				}
+
+				err = GetS3Manager().InitializeS3Client(userID, config)
 				if err != nil {
-					log.Error().Err(err).Str("userID", userID).Msg("Failed to get S3 config")
-					return
-				}
-
-				if s3Config.Enabled {
-					config := &S3Config{
-						Enabled:       s3Config.Enabled,
-						Endpoint:      s3Config.Endpoint,
-						Region:        s3Config.Region,
-						Bucket:        s3Config.Bucket,
-						AccessKey:     s3Config.AccessKey,
-						SecretKey:     s3Config.SecretKey,
-						PathStyle:     s3Config.PathStyle,
-						PublicURL:     s3Config.PublicURL,
-						RetentionDays: s3Config.RetentionDays,
-					}
-
-					err = GetS3Manager().InitializeS3Client(userID, config)
-					if err != nil {
-						log.Error().Err(err).Str("userID", userID).Msg("Failed to initialize S3 client on startup")
-					} else {
-						var secondaryConfig *S3Config
-						if s3Config.SecondaryEnabled {
-							secondaryConfig = &S3Config{
-								Enabled:       true,
-								Endpoint:      s3Config.SecondaryEndpoint,
-								Region:        s3Config.SecondaryRegion,
-								Bucket:        s3Config.SecondaryBucket,
-								AccessKey:     s3Config.SecondaryAccessKey,
-								SecretKey:     s3Config.SecondarySecretKey,
-								PathStyle:     s3Config.SecondaryPathStyle,
-								PublicURL:     s3Config.SecondaryPublicURL,
-								RetentionDays: s3Config.SecondaryRetentionDays,
-							}
+					log.Error().Err(err).Str("userID", userID).Msg("Failed to initialize S3 client on startup")
+				} else {
+					var secondaryConfig *S3Config
+					if s3Config.SecondaryEnabled {
+						secondaryConfig = &S3Config{
+							Enabled:       true,
+							Endpoint:      s3Config.SecondaryEndpoint,
+							Region:        s3Config.SecondaryRegion,
+							Bucket:        s3Config.SecondaryBucket,
+							AccessKey:     s3Config.SecondaryAccessKey,
+							SecretKey:     s3Config.SecondarySecretKey,
+							PathStyle:     s3Config.SecondaryPathStyle,
+							PublicURL:     s3Config.SecondaryPublicURL,
+							RetentionDays: s3Config.SecondaryRetentionDays,
 						}
-						GetS3Manager().ConfigureFailover(userID, secondaryConfig, s3Config.FailoverThreshold, s3Config.FailoverCooldownMinutes)
-						log.Info().Str("userID", userID).Msg("S3 client initialized on startup")
 					}
+					GetS3Manager().ConfigureFailover(userID, secondaryConfig, s3Config.FailoverThreshold, s3Config.FailoverCooldownMinutes)
+					log.Info().Str("userID", userID).Msg("S3 client initialized on startup")
 				}
-			}(txtid)
-		}
-	}
-	err = rows.Err()
-	if err != nil {
-		log.Error().Err(err).Msg("DB Problem")
+			}
+		}(txtid)
 	}
 }
 
@@ -728,7 +741,7 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 				} else if evt.Event == "success" {
 					log.Info().Msg("QR pairing ok!")
 					// Clear QR code after pairing
-					sqlStmt := `UPDATE users SET qrcode='', connected=1 WHERE id=$1`
+					sqlStmt := `UPDATE users SET qrcode='', connected=1, autostart=1 WHERE id=$1`
 					_, err := s.db.Exec(sqlStmt, userID)
 					if err != nil {
 						log.Error().Err(err).Msg(sqlStmt)
@@ -862,7 +875,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		} else {
 			log.Info().Msg("Marked self as available")
 		}
-		sqlStmt := `UPDATE users SET connected=1 WHERE id=$1`
+		sqlStmt := `UPDATE users SET connected=1, autostart=1 WHERE id=$1`
 		_, err = mycli.db.Exec(sqlStmt, mycli.userID)
 		if err != nil {
 			log.Error().Err(err).Msg(sqlStmt)
@@ -871,7 +884,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	case *events.PairSuccess:
 		log.Info().Str("userid", mycli.userID).Str("token", mycli.token).Str("ID", evt.ID.String()).Str("BusinessName", evt.BusinessName).Str("Platform", evt.Platform).Msg("QR Pair Success")
 		jid := evt.ID
-		sqlStmt := `UPDATE users SET jid=$1 WHERE id=$2`
+		sqlStmt := `UPDATE users SET jid=$1, autostart=1 WHERE id=$2`
 		_, err := mycli.db.Exec(sqlStmt, jid, mycli.userID)
 		if err != nil {
 			log.Error().Err(err).Msg(sqlStmt)
@@ -2007,7 +2020,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			default:
 			}
 		}()
-		sqlStmt := `UPDATE users SET connected=0 WHERE id=$1`
+		sqlStmt := `UPDATE users SET connected=0, autostart=0 WHERE id=$1`
 		_, err := mycli.db.Exec(sqlStmt, mycli.userID)
 		if err != nil {
 			log.Error().Err(err).Msg(sqlStmt)

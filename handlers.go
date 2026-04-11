@@ -262,7 +262,7 @@ func (s *server) Connect() http.HandlerFunc {
 			}
 		}
 		eventstring = strings.Join(subscribedEvents, ",")
-		_, err = s.db.Exec("UPDATE users SET events=$1 WHERE id=$2", eventstring, txtid)
+		_, err = s.db.Exec("UPDATE users SET events=$1, autostart=1 WHERE id=$2", eventstring, txtid)
 		if err != nil {
 			log.Warn().Msg("Could not set events in users table")
 		}
@@ -319,7 +319,7 @@ func (s *server) Disconnect() http.HandlerFunc {
 			if mycli := clientManager.GetMyClient(txtid); mycli != nil {
 				mycli.disableAutoReconnect()
 			}
-			_, err := s.db.Exec("UPDATE users SET connected=0,events=$1 WHERE id=$2", "", txtid)
+			_, err := s.db.Exec("UPDATE users SET connected=0, autostart=0, events=$1 WHERE id=$2", "", txtid)
 			if err != nil {
 				log.Warn().Str("txtid", txtid).Msg("Could not set events in users table")
 			}
@@ -5064,9 +5064,9 @@ func (s *server) AddUser() http.HandlerFunc {
 
 		// Insert user with all proxy, S3 and HMAC fields
 		if _, err = s.db.Exec(
-			"INSERT INTO users (id, name, token, webhook, expiration, events, jid, qrcode, proxy_url, s3_enabled, s3_endpoint, s3_region, s3_bucket, s3_access_key, s3_secret_key, s3_path_style, s3_public_url, media_delivery, s3_retention_days, s3_secondary_enabled, s3_secondary_endpoint, s3_secondary_region, s3_secondary_bucket, s3_secondary_access_key, s3_secondary_secret_key, s3_secondary_path_style, s3_secondary_public_url, s3_secondary_retention_days, s3_failover_threshold, s3_failover_cooldown_minutes, hmac_key, history) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)",
+			"INSERT INTO users (id, name, token, webhook, expiration, events, jid, qrcode, proxy_url, autostart, s3_enabled, s3_endpoint, s3_region, s3_bucket, s3_access_key, s3_secret_key, s3_path_style, s3_public_url, media_delivery, s3_retention_days, s3_secondary_enabled, s3_secondary_endpoint, s3_secondary_region, s3_secondary_bucket, s3_secondary_access_key, s3_secondary_secret_key, s3_secondary_path_style, s3_secondary_public_url, s3_secondary_retention_days, s3_failover_threshold, s3_failover_cooldown_minutes, hmac_key, history) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)",
 			id, user.Name, user.Token, user.Webhook, user.Expiration, user.Events, "", "", user.ProxyConfig.ProxyURL,
-			user.S3Config.Enabled, user.S3Config.Endpoint, user.S3Config.Region, user.S3Config.Bucket, user.S3Config.AccessKey, user.S3Config.SecretKey, user.S3Config.PathStyle, user.S3Config.PublicURL, user.S3Config.MediaDelivery, user.S3Config.RetentionDays,
+			false, user.S3Config.Enabled, user.S3Config.Endpoint, user.S3Config.Region, user.S3Config.Bucket, user.S3Config.AccessKey, user.S3Config.SecretKey, user.S3Config.PathStyle, user.S3Config.PublicURL, user.S3Config.MediaDelivery, user.S3Config.RetentionDays,
 			false, "", "", "", "", "", true, "", 30, 2, 10,
 			encryptedHmacKey, user.History,
 		); err != nil {

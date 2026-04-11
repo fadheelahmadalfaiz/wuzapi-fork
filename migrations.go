@@ -83,6 +83,11 @@ var migrations = []Migration{
 		Name:  "add_s3_failover_support",
 		UpSQL: addS3FailoverSupportSQL,
 	},
+	{
+		ID:    11,
+		Name:  "add_autostart",
+		UpSQL: addAutostartSQL,
+	},
 }
 
 const changeIDToStringSQL = `
@@ -119,6 +124,7 @@ BEGIN
             jid TEXT NOT NULL DEFAULT '',
             qrcode TEXT NOT NULL DEFAULT '',
             connected INTEGER,
+            autostart INTEGER NOT NULL DEFAULT 0,
             expiration INTEGER,
             events TEXT NOT NULL DEFAULT '',
             proxy_url TEXT DEFAULT ''
@@ -361,6 +367,7 @@ func ensureUsersTableExists(db *sqlx.DB) error {
 				jid TEXT NOT NULL DEFAULT '',
 				qrcode TEXT NOT NULL DEFAULT '',
 				connected INTEGER,
+				autostart INTEGER NOT NULL DEFAULT 0,
 				expiration INTEGER,
 				events TEXT NOT NULL DEFAULT '',
 				proxy_url TEXT DEFAULT ''
@@ -375,6 +382,7 @@ func ensureUsersTableExists(db *sqlx.DB) error {
 				jid TEXT NOT NULL DEFAULT '',
 				qrcode TEXT NOT NULL DEFAULT '',
 				connected INTEGER,
+				autostart INTEGER NOT NULL DEFAULT 0,
 				expiration INTEGER,
 				events TEXT NOT NULL DEFAULT '',
 				proxy_url TEXT DEFAULT ''
@@ -503,6 +511,7 @@ func applyMigration(db *sqlx.DB, migration Migration) error {
                     jid TEXT NOT NULL DEFAULT '',
                     qrcode TEXT NOT NULL DEFAULT '',
                     connected INTEGER,
+                    autostart INTEGER NOT NULL DEFAULT 0,
                     expiration INTEGER,
                     events TEXT NOT NULL DEFAULT '',
                     proxy_url TEXT DEFAULT ''
@@ -717,6 +726,15 @@ func applyMigration(db *sqlx.DB, migration Migration) error {
 		} else {
 			_, err = tx.Exec(migration.UpSQL)
 		}
+	} else if migration.ID == 11 {
+		if db.DriverName() == "sqlite" {
+			err = addColumnIfNotExistsSQLite(tx, "users", "autostart", "INTEGER NOT NULL DEFAULT 0")
+			if err == nil {
+				_, err = tx.Exec(`UPDATE users SET autostart = CASE WHEN COALESCE(jid, '') <> '' AND COALESCE(connected, 0) = 1 THEN 1 ELSE 0 END WHERE COALESCE(autostart, 0) = 0`)
+			}
+		} else {
+			_, err = tx.Exec(migration.UpSQL)
+		}
 	} else {
 		_, err = tx.Exec(migration.UpSQL)
 	}
@@ -861,6 +879,7 @@ func migrateSQLiteIDToString(tx *sqlx.Tx) error {
             jid TEXT NOT NULL DEFAULT '',
             qrcode TEXT NOT NULL DEFAULT '',
             connected INTEGER,
+            autostart INTEGER NOT NULL DEFAULT 0,
             expiration INTEGER,
             events TEXT NOT NULL DEFAULT '',
             proxy_url TEXT DEFAULT ''
@@ -875,7 +894,7 @@ func migrateSQLiteIDToString(tx *sqlx.Tx) error {
         SELECT
             hex(randomblob(16)),
             name, token, webhook, jid, qrcode,
-            connected, expiration, events, proxy_url 
+            connected, 0, expiration, events, proxy_url 
         FROM users`)
 	if err != nil {
 		return fmt.Errorf("failed to copy data: %w", err)
@@ -966,6 +985,22 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 's3_failover_cooldown_minutes' AND table_schema = current_schema()) THEN
         ALTER TABLE users ADD COLUMN s3_failover_cooldown_minutes INTEGER DEFAULT 10;
     END IF;
+END $$;
+
+-- SQLite version (handled in code)
+`
+
+const addAutostartSQL = `
+-- PostgreSQL version
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'autostart' AND table_schema = current_schema()) THEN
+        ALTER TABLE users ADD COLUMN autostart INTEGER NOT NULL DEFAULT 0;
+    END IF;
+
+    UPDATE users
+    SET autostart = CASE WHEN COALESCE(jid, '') <> '' AND COALESCE(connected, 0) = 1 THEN 1 ELSE 0 END
+    WHERE COALESCE(autostart, 0) = 0;
 END $$;
 
 -- SQLite version (handled in code)
