@@ -53,13 +53,20 @@ const (
 	autoReconnectMaxDelay  = 5 * time.Minute
 )
 
+func boolToDBInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 func setUserConnectionState(db *sqlx.DB, userID string, connected bool) error {
-	_, err := db.Exec(`UPDATE users SET connected=$1 WHERE id=$2`, connected, userID)
+	_, err := db.Exec(`UPDATE users SET connected=$1 WHERE id=$2`, boolToDBInt(connected), userID)
 	return err
 }
 
 func setUserConnectionAndAutostartState(db *sqlx.DB, userID string, connected bool, autostart bool) error {
-	_, err := db.Exec(`UPDATE users SET connected=$1, autostart=$2 WHERE id=$3`, connected, autostart, userID)
+	_, err := db.Exec(`UPDATE users SET connected=$1, autostart=$2 WHERE id=$3`, boolToDBInt(connected), boolToDBInt(autostart), userID)
 	return err
 }
 
