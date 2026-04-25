@@ -104,8 +104,8 @@ func TestInitializeSchemaAddsAutostartColumnAndBackfills(t *testing.T) {
 	if got["paired-active"] != 1 {
 		t.Fatalf("expected paired-active autostart=1, got %d", got["paired-active"])
 	}
-	if got["paired-inactive"] != 0 {
-		t.Fatalf("expected paired-inactive autostart=0, got %d", got["paired-inactive"])
+	if got["paired-inactive"] != 1 {
+		t.Fatalf("expected paired-inactive autostart=1, got %d", got["paired-inactive"])
 	}
 	if got["unpaired-active"] != 0 {
 		t.Fatalf("expected unpaired-active autostart=0, got %d", got["unpaired-active"])

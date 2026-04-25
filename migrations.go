@@ -730,7 +730,7 @@ func applyMigration(db *sqlx.DB, migration Migration) error {
 		if db.DriverName() == "sqlite" {
 			err = addColumnIfNotExistsSQLite(tx, "users", "autostart", "INTEGER NOT NULL DEFAULT 0")
 			if err == nil {
-				_, err = tx.Exec(`UPDATE users SET autostart = CASE WHEN COALESCE(jid, '') <> '' AND COALESCE(connected, 0) = 1 THEN 1 ELSE 0 END WHERE COALESCE(autostart, 0) = 0`)
+				_, err = tx.Exec(`UPDATE users SET autostart = CASE WHEN COALESCE(jid, '') <> '' THEN 1 ELSE 0 END WHERE COALESCE(autostart, 0) = 0`)
 			}
 		} else {
 			_, err = tx.Exec(migration.UpSQL)
@@ -999,7 +999,7 @@ BEGIN
     END IF;
 
     UPDATE users
-    SET autostart = CASE WHEN COALESCE(jid, '') <> '' AND COALESCE(connected, 0) = 1 THEN 1 ELSE 0 END
+    SET autostart = CASE WHEN COALESCE(jid, '') <> '' THEN 1 ELSE 0 END
     WHERE COALESCE(autostart, 0) = 0;
 END $$;
 

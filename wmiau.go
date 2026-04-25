@@ -53,6 +53,16 @@ const (
 	autoReconnectMaxDelay  = 5 * time.Minute
 )
 
+func setUserConnectionState(db *sqlx.DB, userID string, connected bool) error {
+	_, err := db.Exec(`UPDATE users SET connected=$1 WHERE id=$2`, connected, userID)
+	return err
+}
+
+func setUserConnectionAndAutostartState(db *sqlx.DB, userID string, connected bool, autostart bool) error {
+	_, err := db.Exec(`UPDATE users SET connected=$1, autostart=$2 WHERE id=$3`, connected, autostart, userID)
+	return err
+}
+
 func calculateAutoReconnectDelay(attempt int) time.Duration {
 	if attempt <= 1 {
 		return autoReconnectBaseDelay
@@ -157,6 +167,9 @@ func (mycli *MyClient) scheduleAutoReconnect(reason string) {
 
 			err := mycli.WAClient.Connect()
 			if err == nil {
+				if dbErr := setUserConnectionAndAutostartState(mycli.db, mycli.userID, true, true); dbErr != nil {
+					log.Warn().Err(dbErr).Str("userID", mycli.userID).Msg("Failed to persist connection state after auto-reconnect")
+				}
 				log.Info().Str("userID", mycli.userID).Int("attempt", attempt).Msg("WhatsApp auto-reconnect succeeded")
 				mycli.resetAutoReconnect()
 				return
@@ -741,10 +754,9 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 				} else if evt.Event == "success" {
 					log.Info().Msg("QR pairing ok!")
 					// Clear QR code after pairing
-					sqlStmt := `UPDATE users SET qrcode='', connected=1, autostart=1 WHERE id=$1`
-					_, err := s.db.Exec(sqlStmt, userID)
+					err := setUserConnectionAndAutostartState(s.db, userID, true, true)
 					if err != nil {
-						log.Error().Err(err).Msg(sqlStmt)
+						log.Error().Err(err).Msg("failed to persist paired connection state")
 					} else {
 						if found {
 							v := updateUserInfo(myuserinfo, "Qrcode", "")
@@ -820,10 +832,8 @@ func (s *server) startClient(userID string, textjid string, token string, subscr
 			clientManager.DeleteWhatsmeowClient(userID)
 			clientManager.DeleteMyClient(userID)
 			clientManager.DeleteHTTPClient(userID)
-			sqlStmt := `UPDATE users SET qrcode='', connected=0 WHERE id=$1`
-			_, err := s.db.Exec(sqlStmt, userID)
-			if err != nil {
-				log.Error().Err(err).Msg(sqlStmt)
+			if err := setUserConnectionState(s.db, userID, false); err != nil {
+				log.Error().Err(err).Msg("failed to persist disconnected state during shutdown")
 			}
 			delete(killchannel, userID)
 			return
@@ -864,30 +874,26 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		postmap["type"] = "Connected"
 		dowebhook = 1
 		mycli.resetAutoReconnect()
-		if len(mycli.WAClient.Store.PushName) == 0 {
-			break
+		if err := setUserConnectionAndAutostartState(mycli.db, mycli.userID, true, true); err != nil {
+			log.Error().Err(err).Msg("failed to persist connected state")
+			return
 		}
 		// Send presence available when connecting and when the pushname is changed.
 		// This makes sure that outgoing messages always have the right pushname.
-		err := mycli.WAClient.SendPresence(context.Background(), types.PresenceAvailable)
-		if err != nil {
-			log.Warn().Err(err).Msg("Failed to send available presence")
-		} else {
-			log.Info().Msg("Marked self as available")
-		}
-		sqlStmt := `UPDATE users SET connected=1, autostart=1 WHERE id=$1`
-		_, err = mycli.db.Exec(sqlStmt, mycli.userID)
-		if err != nil {
-			log.Error().Err(err).Msg(sqlStmt)
-			return
+		if len(mycli.WAClient.Store.PushName) > 0 {
+			err := mycli.WAClient.SendPresence(context.Background(), types.PresenceAvailable)
+			if err != nil {
+				log.Warn().Err(err).Msg("Failed to send available presence")
+			} else {
+				log.Info().Msg("Marked self as available")
+			}
 		}
 	case *events.PairSuccess:
 		log.Info().Str("userid", mycli.userID).Str("token", mycli.token).Str("ID", evt.ID.String()).Str("BusinessName", evt.BusinessName).Str("Platform", evt.Platform).Msg("QR Pair Success")
 		jid := evt.ID
-		sqlStmt := `UPDATE users SET jid=$1, autostart=1 WHERE id=$2`
-		_, err := mycli.db.Exec(sqlStmt, jid, mycli.userID)
+		_, err := mycli.db.Exec(`UPDATE users SET jid=$1, autostart=1 WHERE id=$2`, jid, mycli.userID)
 		if err != nil {
-			log.Error().Err(err).Msg(sqlStmt)
+			log.Error().Err(err).Msg("failed to persist jid/autostart after pairing")
 			return
 		}
 
@@ -2020,10 +2026,8 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			default:
 			}
 		}()
-		sqlStmt := `UPDATE users SET connected=0, autostart=0 WHERE id=$1`
-		_, err := mycli.db.Exec(sqlStmt, mycli.userID)
-		if err != nil {
-			log.Error().Err(err).Msg(sqlStmt)
+		if err := setUserConnectionAndAutostartState(mycli.db, mycli.userID, false, false); err != nil {
+			log.Error().Err(err).Msg("failed to persist logout state")
 			return
 		}
 	case *events.ChatPresence:
@@ -2053,11 +2057,17 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	case *events.Disconnected:
 		postmap["type"] = "Disconnected"
 		dowebhook = 1
+		if err := setUserConnectionState(mycli.db, mycli.userID, false); err != nil {
+			log.Warn().Err(err).Str("userID", mycli.userID).Msg("Failed to persist disconnected state")
+		}
 		log.Info().Str("reason", fmt.Sprintf("%+v", evt)).Msg("Disconnected from Whatsapp")
 		mycli.scheduleAutoReconnect("disconnected_event")
 	case *events.ConnectFailure:
 		postmap["type"] = "ConnectFailure"
 		dowebhook = 1
+		if err := setUserConnectionState(mycli.db, mycli.userID, false); err != nil {
+			log.Warn().Err(err).Str("userID", mycli.userID).Msg("Failed to persist connect-failure state")
+		}
 		log.Error().Str("reason", fmt.Sprintf("%+v", evt)).Msg("Failed to connect to Whatsapp")
 		mycli.scheduleAutoReconnect("connect_failure_event")
 	case *events.UndecryptableMessage:
@@ -2091,10 +2101,16 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	case *events.KeepAliveRestored:
 		postmap["type"] = "KeepAliveRestored"
 		dowebhook = 1
+		if err := setUserConnectionAndAutostartState(mycli.db, mycli.userID, true, true); err != nil {
+			log.Warn().Err(err).Str("userID", mycli.userID).Msg("Failed to persist keepalive-restored state")
+		}
 		log.Info().Msg("Keep alive restored")
 	case *events.KeepAliveTimeout:
 		postmap["type"] = "KeepAliveTimeout"
 		dowebhook = 1
+		if err := setUserConnectionState(mycli.db, mycli.userID, false); err != nil {
+			log.Warn().Err(err).Str("userID", mycli.userID).Msg("Failed to persist keepalive-timeout state")
+		}
 		log.Warn().Msg("Keep alive timeout")
 		mycli.scheduleAutoReconnect("keepalive_timeout")
 	case *events.ClientOutdated:

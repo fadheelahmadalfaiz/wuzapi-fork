@@ -838,11 +838,18 @@ func (s *server) GetStatus() http.HandlerFunc {
 		txtid := userInfo.Get("Id")
 
 		client := clientManager.GetWhatsmeowClient(txtid)
+		hasActiveSession := client != nil
 		isConnected := false
 		isLoggedIn := false
 		if client != nil {
 			isConnected = client.IsConnected()
 			isLoggedIn = client.IsLoggedIn()
+		}
+
+		var dbConnected bool
+		var autostart bool
+		if err := s.db.QueryRow(`SELECT COALESCE(connected, false), COALESCE(autostart, false) FROM users WHERE id = $1`, txtid).Scan(&dbConnected, &autostart); err != nil && err != sql.ErrNoRows {
+			log.Warn().Err(err).Str("user_id", txtid).Msg("Failed to query connection flags for user")
 		}
 
 		var proxyURL string
@@ -917,20 +924,23 @@ func (s *server) GetStatus() http.HandlerFunc {
 		hmacConfigured := len(hmacKey) > 0
 
 		response := map[string]interface{}{
-			"id":              txtid,
-			"name":            userInfo.Get("Name"),
-			"connected":       isConnected,
-			"loggedIn":        isLoggedIn,
-			"token":           userInfo.Get("Token"),
-			"jid":             userInfo.Get("Jid"),
-			"webhook":         userInfo.Get("Webhook"),
-			"events":          userInfo.Get("Events"),
-			"proxy_url":       userInfo.Get("Proxy"),
-			"qrcode":          userInfo.Get("Qrcode"),
-			"history":         userInfo.Get("History"),
-			"proxy_config":    proxyConfig,
-			"s3_config":       s3Config,
-			"hmac_configured": hmacConfigured,
+			"id":                 txtid,
+			"name":               userInfo.Get("Name"),
+			"connected":          isConnected,
+			"loggedIn":           isLoggedIn,
+			"has_active_session": hasActiveSession,
+			"db_connected":       dbConnected,
+			"autostart":          autostart,
+			"token":              userInfo.Get("Token"),
+			"jid":                userInfo.Get("Jid"),
+			"webhook":            userInfo.Get("Webhook"),
+			"events":             userInfo.Get("Events"),
+			"proxy_url":          userInfo.Get("Proxy"),
+			"qrcode":             userInfo.Get("Qrcode"),
+			"history":            userInfo.Get("History"),
+			"proxy_config":       proxyConfig,
+			"s3_config":          s3Config,
+			"hmac_configured":    hmacConfigured,
 		}
 		responseJson, err := json.Marshal(response)
 		if err != nil {
@@ -4752,6 +4762,7 @@ func (s *server) ListUsers() http.HandlerFunc {
 		Jid        string         `db:"jid"`
 		Qrcode     string         `db:"qrcode"`
 		Connected  sql.NullBool   `db:"connected"`
+		Autostart  sql.NullBool   `db:"autostart"`
 		Expiration sql.NullInt64  `db:"expiration"`
 		ProxyURL   sql.NullString `db:"proxy_url"`
 		Events     string         `db:"events"`
@@ -4766,11 +4777,11 @@ func (s *server) ListUsers() http.HandlerFunc {
 
 		if hasID {
 			// Fetch a single user
-			query = "SELECT id, name, token, webhook, jid, qrcode, connected, expiration, proxy_url, events, history FROM users WHERE id = $1"
+			query = "SELECT id, name, token, webhook, jid, qrcode, connected, autostart, expiration, proxy_url, events, history FROM users WHERE id = $1"
 			args = append(args, userID)
 		} else {
 			// Fetch all users
-			query = "SELECT id, name, token, webhook, jid, qrcode, connected, expiration, proxy_url, events, history FROM users"
+			query = "SELECT id, name, token, webhook, jid, qrcode, connected, autostart, expiration, proxy_url, events, history FROM users"
 		}
 
 		rows, err := s.db.Queryx(query, args...)
@@ -4792,26 +4803,30 @@ func (s *server) ListUsers() http.HandlerFunc {
 				return
 			}
 
+			client := clientManager.GetWhatsmeowClient(user.Id)
+			hasActiveSession := client != nil
 			isConnected := false
 			isLoggedIn := false
-			if clientManager.GetWhatsmeowClient(user.Id) != nil {
-				isConnected = clientManager.GetWhatsmeowClient(user.Id).IsConnected()
-				isLoggedIn = clientManager.GetWhatsmeowClient(user.Id).IsLoggedIn()
+			if client != nil {
+				isConnected = client.IsConnected()
+				isLoggedIn = client.IsLoggedIn()
 			}
 
-			//"connected":  user.Connected.Bool,
 			userMap := map[string]interface{}{
-				"id":         user.Id,
-				"name":       user.Name,
-				"token":      user.Token,
-				"webhook":    user.Webhook,
-				"jid":        user.Jid,
-				"qrcode":     user.Qrcode,
-				"connected":  isConnected,
-				"loggedIn":   isLoggedIn,
-				"expiration": user.Expiration.Int64,
-				"proxy_url":  user.ProxyURL.String,
-				"events":     user.Events,
+				"id":                 user.Id,
+				"name":               user.Name,
+				"token":              user.Token,
+				"webhook":            user.Webhook,
+				"jid":                user.Jid,
+				"qrcode":             user.Qrcode,
+				"connected":          isConnected,
+				"loggedIn":           isLoggedIn,
+				"has_active_session": hasActiveSession,
+				"db_connected":       user.Connected.Bool,
+				"autostart":          user.Autostart.Bool,
+				"expiration":         user.Expiration.Int64,
+				"proxy_url":          user.ProxyURL.String,
+				"events":             user.Events,
 			}
 			// Add proxy_config
 			proxyURL := user.ProxyURL.String
